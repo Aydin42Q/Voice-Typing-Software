@@ -144,6 +144,15 @@ class WindowManager {
       ...position,
     });
 
+    if (process.env.NODE_ENV === "development") {
+      this.mainWindow.webContents.once("did-finish-load", () => {
+        this.mainWindow.webContents.openDevTools({
+          mode: "detach",
+        });
+      });
+    }
+
+
     this.setMainWindowInteractivity(false);
     this.registerMainWindowEvents();
     this.registerAssistantSelectionContextMenu();

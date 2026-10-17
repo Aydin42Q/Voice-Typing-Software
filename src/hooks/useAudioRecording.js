@@ -1,3 +1,5 @@
+import { resolveContextualCommands } from "../helpers/contextualCommands.js";
+import { classifyWithLocalModel } from "../helpers/localCommandClassifier.js";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import AudioManager from "../helpers/audioManager";
@@ -26,6 +28,45 @@ import { waitForVisualFrames } from "../utils/visualFrame";
 import { resolveLifecycleInputKind } from "../helpers/dictationRouting";
 import { createAssistantResponseDelivery } from "../helpers/assistantResponseDelivery";
 import { recordCleanupFailure } from "../stores/cleanupFailureStore";
+
+console.warn("[Voice Debug] Hook module loaded", import.meta.env.DEV);
+
+const COMMAND_PREVIEW_CONFIG = {
+  escapePhrases: ["escape"],
+  modeSwitches: [
+    { phrase: "navigate mode", mode: "navigation" },
+    { phrase: "writing mode", mode: "writing" },
+  ],
+  modes: {
+    writing: {
+      bindings: [
+        {
+          id: "enter",
+          phrase: "enter",
+          action: "insert_newline",
+          interpretation: "contextual",
+        },
+        {
+          id: "zorp",
+          phrase: "zorp",
+          action: "insert_newline",
+          interpretation: "always",
+        },
+      ],
+    },
+    navigation: {
+      bindings: [
+        {
+          id: "up2",
+          phrase: "up two paragraphs",
+          action: "move_up_two_paragraphs",
+          interpretation: "always",
+        },
+      ],
+    },
+  },
+};
+
 
 // Maps a failed selection-replacement code to its `selectionEditing.*` toast
 // detail key; unlisted codes fall back to the generic "unavailable" message.
@@ -62,6 +103,8 @@ export const useAudioRecording = (toast, options = {}) => {
   const [transcript, setTranscript] = useState("");
   const [partialTranscript, setPartialTranscript] = useState("");
   const audioManagerRef = useRef(null);
+  const commandPreviewModeRef = useRef("writing");
+  const commandPreviewQueueRef = useRef(Promise.resolve());
   const startLockRef = useRef(false);
   const stopRequestedDuringStartRef = useRef(false);
   const pushForceStoppedRef = useRef(false);
@@ -631,10 +674,17 @@ export const useAudioRecording = (toast, options = {}) => {
         }
       },
       onTranscriptionComplete: async (result) => {
+        console.warn("[Voice Debug] Transcription callback recieved", {
+          success: result?.success,
+          hasText: Boolean(result?.text?.trim()),
+          dev: import.meta.env.DEV,
+        });
+
         if (result.success) {
           dictationErrorGenerationRef.current += 1;
           dismissDictationError?.();
           const transcribedText = result.text?.trim();
+          
 
           if (!transcribedText) {
             window.electronAPI?.hideDictationPreview?.();
@@ -644,6 +694,49 @@ export const useAudioRecording = (toast, options = {}) => {
             });
             return;
           }
+
+          console.warn("[Voice Debug] Preview conditions", {
+            developmentMode: import.meta.env.DEV,
+            assistantConversation: Boolean(result.assistantConversation),
+            selectionEdit : Boolean(result.selectionEdit?.sessionId),
+            translationRequested: Boolean(audioManagerRef.current?.translationRequested),
+          });
+
+          if (
+            import.meta.env.DEV &&
+            !result.assistantConversation &&
+            !result.selectionEdit?.sessionId &&
+            !audioManagerRef.current?.translationRequested
+          ) {
+            const spokenText = result.rawText ?? result.text;
+
+            commandPreviewQueueRef.current = commandPreviewQueueRef.current
+              .then(async () => {
+                const interpretation = await resolveContextualCommands(
+                  spokenText,
+                  commandPreviewModeRef.current,
+                  COMMAND_PREVIEW_CONFIG,
+                  (input) =>
+                    classifyWithLocalModel(input, {
+                      baseUrl: "http://127.0.0.1:8221",
+                    })
+                );
+
+                commandPreviewModeRef.current = interpretation.mode;
+
+                console.info("[Dictation Command Preview]", {
+                  transcript: spokenText,
+                  interpretation,
+                });
+              })
+              .catch((error) => {
+                console.warn(
+                  "[Dictation Command Preview] Failed:",
+                  error
+                );
+              });
+          }
+
 
           // A selection edit must replace the model's exact result. Snippet
           // expansion is a dictation convenience and can otherwise mutate a
